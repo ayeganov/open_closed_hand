@@ -32,9 +32,40 @@ def draw_rectangle(image, x, y, width, height, color_bgr):
 
 
 class BackgroundRemover:
-    """
-    Removes the background
-    """
+    def __init__(self):
+        self._background = None
+
+    def calibrate(self, image):
+        self._background = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    def get_foreground(self, image):
+        mask = self._calc_foreground_mask(image)
+#        background_mask = np.logical_not(mask)
+        foreground = image.copy()
+        foreground[mask] = (0, 0, 0)
+        cv2.imshow("foreground", foreground)
+        return foreground
+
+    def _calc_foreground_mask(self, image):
+        if self._background is None:
+            return np.zeros(image.shape)
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        threshold_offset = 10
+
+        bg_diff_low = np.clip(self._background - threshold_offset, 0, 255)
+        bg_diff_high = np.clip(self._background + threshold_offset, 0, 255)
+
+        low_match = bg_diff_low <= gray
+        high_match = gray <= bg_diff_high
+
+        all_matches = np.logical_and(low_match, high_match)
+
+        return all_matches
+
+        image[all_matches] = 0
+        return image
 
 
 class SkinDetector:
@@ -75,13 +106,16 @@ class SkinDetector:
         return image, self._top_sample, self._bottom_sample
 
     def calibrate(self, image):
-        cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
         (x_left, y_left), (x_right, y_right) = self._top_sample
         top_sample = image[y_left:y_right, x_left:x_right]
 
         (x_left, y_left), (x_right, y_right) = self._bottom_sample
         bottom_sample = image[y_left:y_right, x_left:x_right]
+
+        cv2.imshow("top_sample", top_sample)
+        cv2.imshow("bottom_sample", bottom_sample)
 
         self._calculate_threshold(top_sample, bottom_sample)
 
@@ -92,23 +126,24 @@ class SkinDetector:
         top_mean = np.mean(top, axis=(0, 1))
         bottom_mean = np.mean(bottom, axis=(0, 1))
 
-        self._hue_low = np.min((top_mean[0], bottom_mean[0])) - offset_low
+        self._hue_low = max(0.0, np.min((top_mean[0], bottom_mean[0])) - offset_low)
         self._hue_high = np.max((top_mean[0], bottom_mean[0])) + offset_high
 
-        self._sat_low = np.min((top_mean[1], bottom_mean[1])) - offset_low
+        self._sat_low = max(0.0, np.min((top_mean[1], bottom_mean[1])) - offset_low)
         self._sat_high = np.max((top_mean[1], bottom_mean[1])) + offset_high
 
-        self._value_low = np.min((top_mean[2], bottom_mean[2])) - offset_low
+        self._value_low = max(0.0, np.min((top_mean[2], bottom_mean[2])) - offset_low)
         self._value_high = np.max((top_mean[2], bottom_mean[2])) + offset_high
 
     def calc_skin_mask(self, image):
         if self._hue_low is None:
             return np.zeros(image.shape, dtype=np.uint8)
 
-        cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        low = (self._hue_low, self._sat_low, 0)
-        high = (self._hue_high, self._sat_high, 255)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        low = (self._hue_low, self._sat_low, self._value_low)
+        high = (self._hue_high, self._sat_high, self._value_high)
 
+        print(f"low: {low}, high: {high}")
         output = cv2.inRange(image, low, high)
 
         struct_element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -124,6 +159,7 @@ def start_capture(resolution):
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
     detector = SkinDetector()
+    bg_remover = BackgroundRemover()
 
     index = 0
     mask = None
@@ -143,10 +179,16 @@ def start_capture(resolution):
                 break
             if k == ord('c'):
                 print("Performing calibration...")
-                detector.calibrate(frame.copy())
+                detector.calibrate(frame)
             if k == ord('m'):
                 print("Calculating the skin mask")
-                mask = detector.calc_skin_mask(frame.copy())
+                foreground = bg_remover.get_foreground(frame)
+                mask = detector.calc_skin_mask(foreground)
+            if k == ord('b'):
+                print("Capturing background")
+                bg_remover.calibrate(frame)
+            if k == ord('f'):
+                bg_remover.get_foreground(frame)
             if k == 27:
                 # ESC pressed
                 print("Escape hit, closing...")
@@ -165,8 +207,8 @@ def start_capture(resolution):
             bottom_sample = frame[y_left:y_right, x_left:x_right]
 
             cv2.imshow(WINDOW_NAME, skin_samples)
-            cv2.imshow("top_sample", top_sample)
-            cv2.imshow("bottom_sample", bottom_sample)
+#            cv2.imshow("top_sample", top_sample)
+#            cv2.imshow("bottom_sample", bottom_sample)
 
             if mask is not None:
                 cv2.imshow("mask", mask)
