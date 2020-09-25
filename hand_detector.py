@@ -14,7 +14,6 @@ import torch.nn as nn
 WINDOW_NAME = 'Hand Recognizer'
 
 
-
 eval_transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.Resize(240),
@@ -22,6 +21,28 @@ eval_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
+
+
+def get_model(device, model_path):
+    """
+    Load the model weights to produce a working network
+
+    @param device - string representing either GPU or CPU
+    @param model_path - path to the model weights that has already been pre-trained
+    @returns an initialized neural network
+    """
+    model_conv = models.resnet18(pretrained=True)
+    for param in model_conv.parameters():
+        param.requires_grad = False
+
+    num_ftrs = model_conv.fc.in_features
+    model_conv.fc = nn.Linear(num_ftrs, 2)
+    model_conv = model_conv.to(device)
+
+    model_conv.load_state_dict(torch.load(model_path, map_location=device))
+    model_conv.eval()
+
+    return model_conv
 
 
 def draw_rectangle(image, x, y, width, height, color_bgr):
@@ -59,7 +80,7 @@ class BackgroundRemover:
         mask = self._calc_foreground_mask(image)
         foreground = image.copy()
         foreground[mask] = (0, 0, 0)
-        cv2.imshow("foreground", foreground)
+#        cv2.imshow("foreground", foreground)
         return foreground
 
     def _calc_foreground_mask(self, image):
@@ -206,6 +227,23 @@ def draw_bg_status(image, bg_remover):
                 cv2.LINE_AA)
 
 
+def draw_process_status(image, mode):
+    text = f"Mode: {mode}"
+    location = (600, 600)
+    font_scale = 1
+    color = (55, 100, 255)
+    thickness = 2
+
+    cv2.putText(image,
+                text,
+                location,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                color,
+                thickness,
+                cv2.LINE_AA)
+
+
 def draw_hand_square(image):
     """
     Draw the hand square on the image
@@ -215,13 +253,15 @@ def draw_hand_square(image):
     @returns coordinate of the square for easy extraction
     """
     color_bgr = (100, 50, 255)
-    x, y = 750, 50
+    x, y = 20, 30
 
-    return draw_rectangle(image, x, y, 160, 160, color_bgr)
+    return draw_rectangle(image, x, y, 260, 260, color_bgr)
 
 
 def start_capture(resolution):
     cam = cv2.VideoCapture(0)
+    cam.set(3, 1280)
+    cam.set(4, 720)
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
     detector = SkinDetector()
@@ -229,19 +269,18 @@ def start_capture(resolution):
 
     skin_status_location = (20, 20)
 
-    index = 0
     mask = None
+    mode = "setup"
+
     while cam.isOpened():
         try:
             k = cv2.waitKey(1) & 0xFF
-            location = None
             ret, frame = cam.read()
             frame = np.array(np.fliplr(frame))
 
             if k == ord('o'):
                 # Open pressed
                 print("OPEN")
-                location = "open"
             if k == ord('q'):
                 print("Exiting by user request...")
                 break
@@ -257,6 +296,9 @@ def start_capture(resolution):
                 bg_remover.calibrate(frame)
             if k == ord('f'):
                 bg_remover.get_foreground(frame)
+            if k == ord('p'):
+                mode = "process" if mode == "setup" else "setup"
+                print("Switching to processing mode...")
             if k == 27:
                 # ESC pressed
                 print("Escape hit, closing...")
@@ -266,41 +308,30 @@ def start_capture(resolution):
                 print("failed to grab frame")
                 break
 
-            skin_samples, top, bottom = detector.draw_skin_samples(frame.copy())
+            if mode == "setup":
+                skin_samples, top, bottom = detector.draw_skin_samples(frame.copy())
+                draw_process_status(skin_samples, mode)
 
-            (x_left, y_left), (x_right, y_right) = top
-            top_sample = frame[y_left:y_right, x_left:x_right]
+                (x_left, y_left), (x_right, y_right) = top
+                top_sample = frame[y_left:y_right, x_left:x_right]
 
-            (x_left, y_left), (x_right, y_right) = bottom
-            bottom_sample = frame[y_left:y_right, x_left:x_right]
+                (x_left, y_left), (x_right, y_right) = bottom
+                bottom_sample = frame[y_left:y_right, x_left:x_right]
 
-            draw_skin_status(skin_samples, detector)
-            draw_bg_status(skin_samples, bg_remover)
-            hand_square = draw_hand_square(skin_samples)
+                draw_skin_status(skin_samples, detector)
+                draw_bg_status(skin_samples, bg_remover)
 
-            cv2.imshow(WINDOW_NAME, skin_samples)
-#            cv2.imshow("top_sample", top_sample)
-#            cv2.imshow("bottom_sample", bottom_sample)
+                cv2.imshow(WINDOW_NAME, skin_samples)
+    #            cv2.imshow("top_sample", top_sample)
+    #            cv2.imshow("bottom_sample", bottom_sample)
 
-            if mask is not None:
-                cv2.imshow("mask", mask)
-
-            if location is not None:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                frame_to_size = cv2.resize(frame, resolution)
-
-                prefix = time.time_ns()
-                file_name = f"{prefix}{str(index)}.png"
-                full_path = os.path.join(location, file_name)
-
-                if not os.path.exists(location):
-                    try:
-                        os.makedirs(location)
-                    except FileExistsError:
-                        pass
-                cv2.imwrite(full_path, frame_to_size)
-                print(full_path)
-                index = index + 1
+            elif mode == "process":
+                draw_on_me = frame.copy()
+                hand_square = draw_hand_square(draw_on_me)
+                draw_process_status(draw_on_me, mode)
+                cv2.imshow(WINDOW_NAME, draw_on_me)
+#                if mask is not None:
+#                    cv2.imshow(WINDOW_NAME, mask)
 
         except KeyboardInterrupt:
             # When everything done, release the capture
