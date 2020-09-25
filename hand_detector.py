@@ -4,11 +4,24 @@ import argparse
 import os
 import time
 
+from torchvision import models, transforms
 import cv2
 import numpy as np
+import torch
+import torch.nn as nn
 
 
-WINDOW_NAME = 'Image Getter'
+WINDOW_NAME = 'Hand Recognizer'
+
+
+
+eval_transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize(240),
+    transforms.CenterCrop(240),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
 
 
 def draw_rectangle(image, x, y, width, height, color_bgr):
@@ -38,9 +51,12 @@ class BackgroundRemover:
     def calibrate(self, image):
         self._background = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
+    @property
+    def calibrated(self):
+        return self._background is not None
+
     def get_foreground(self, image):
         mask = self._calc_foreground_mask(image)
-#        background_mask = np.logical_not(mask)
         foreground = image.copy()
         foreground[mask] = (0, 0, 0)
         cv2.imshow("foreground", foreground)
@@ -64,9 +80,6 @@ class BackgroundRemover:
 
         return all_matches
 
-        image[all_matches] = 0
-        return image
-
 
 class SkinDetector:
     """
@@ -81,6 +94,10 @@ class SkinDetector:
         self._value_high = None
         self._top_sample = None
         self._bottom_sample = None
+
+    @property
+    def calibrated(self):
+        return self._hue_low is not None
 
     def draw_skin_samples(self, image):
         """
@@ -114,8 +131,8 @@ class SkinDetector:
         (x_left, y_left), (x_right, y_right) = self._bottom_sample
         bottom_sample = image[y_left:y_right, x_left:x_right]
 
-        cv2.imshow("top_sample", top_sample)
-        cv2.imshow("bottom_sample", bottom_sample)
+#        cv2.imshow("top_sample", top_sample)
+#        cv2.imshow("bottom_sample", bottom_sample)
 
         self._calculate_threshold(top_sample, bottom_sample)
 
@@ -143,7 +160,6 @@ class SkinDetector:
         low = (self._hue_low, self._sat_low, self._value_low)
         high = (self._hue_high, self._sat_high, self._value_high)
 
-        print(f"low: {low}, high: {high}")
         output = cv2.inRange(image, low, high)
 
         struct_element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -154,12 +170,64 @@ class SkinDetector:
         return output
 
 
+def draw_skin_status(image, skin_detector):
+    status = "READY" if skin_detector.calibrated else "NEEDS A SAMPLE"
+    text = f"Skin detector: {status}"
+    location = (20, 30)
+    font_scale = 1
+    color = (255, 100, 255)
+    thickness = 2
+
+    cv2.putText(image,
+                text,
+                location,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                color,
+                thickness,
+                cv2.LINE_AA)
+
+
+def draw_bg_status(image, bg_remover):
+    status = "READY" if bg_remover.calibrated else "NEEDS A SAMPLE"
+    text = f"BG remover: {status}"
+    location = (600, 30)
+    font_scale = 1
+    color = (55, 100, 255)
+    thickness = 2
+
+    cv2.putText(image,
+                text,
+                location,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                color,
+                thickness,
+                cv2.LINE_AA)
+
+
+def draw_hand_square(image):
+    """
+    Draw the hand square on the image
+
+    @param image - the image to draw on. This function will modify the passed
+                   in image object.
+    @returns coordinate of the square for easy extraction
+    """
+    color_bgr = (100, 50, 255)
+    x, y = 750, 50
+
+    return draw_rectangle(image, x, y, 160, 160, color_bgr)
+
+
 def start_capture(resolution):
     cam = cv2.VideoCapture(0)
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
     detector = SkinDetector()
     bg_remover = BackgroundRemover()
+
+    skin_status_location = (20, 20)
 
     index = 0
     mask = None
@@ -205,6 +273,10 @@ def start_capture(resolution):
 
             (x_left, y_left), (x_right, y_right) = bottom
             bottom_sample = frame[y_left:y_right, x_left:x_right]
+
+            draw_skin_status(skin_samples, detector)
+            draw_bg_status(skin_samples, bg_remover)
+            hand_square = draw_hand_square(skin_samples)
 
             cv2.imshow(WINDOW_NAME, skin_samples)
 #            cv2.imshow("top_sample", top_sample)
@@ -257,6 +329,10 @@ def main():
                         "--resolution",
                         default="50x50",
                         type=to_resolution)
+    parser.add_argument("-m",
+                        "--model",
+                        type=argparse.FileType("r"),
+                        required=False)
 
     args = parser.parse_args()
 
