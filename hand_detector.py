@@ -258,12 +258,13 @@ def draw_hand_square(image):
     return draw_rectangle(image, x, y, 260, 260, color_bgr)
 
 
-def start_capture(resolution):
+def start_capture(resolution, model_path):
     cam = cv2.VideoCapture(0)
     cam.set(3, 1280)
     cam.set(4, 720)
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
+    network = get_model("cpu", model_path)
     detector = SkinDetector()
     bg_remover = BackgroundRemover()
 
@@ -271,6 +272,7 @@ def start_capture(resolution):
 
     mask = None
     mode = "setup"
+    class_names = ["closed", "open"]
 
     while cam.isOpened():
         try:
@@ -298,7 +300,6 @@ def start_capture(resolution):
                 bg_remover.get_foreground(frame)
             if k == ord('p'):
                 mode = "process" if mode == "setup" else "setup"
-                print("Switching to processing mode...")
             if k == 27:
                 # ESC pressed
                 print("Escape hit, closing...")
@@ -326,10 +327,27 @@ def start_capture(resolution):
     #            cv2.imshow("bottom_sample", bottom_sample)
 
             elif mode == "process":
+                foreground = bg_remover.get_foreground(frame)
+                mask = detector.calc_skin_mask(foreground)
+
                 draw_on_me = frame.copy()
-                hand_square = draw_hand_square(draw_on_me)
-                draw_process_status(draw_on_me, mode)
-                cv2.imshow(WINDOW_NAME, draw_on_me)
+                (x_left, y_left), (x_right, y_right) = draw_hand_square(draw_on_me)
+
+                hand = mask[y_left:y_right, x_left:x_right]
+                hand = cv2.bitwise_not(hand)
+                rgb_hand = cv2.cvtColor(hand, cv2.COLOR_GRAY2RGB)
+
+                net_input = eval_transform(rgb_hand)
+                batch = net_input[None, ...]
+
+                outputs = network(batch)
+                _, preds = torch.max(outputs, 1)
+
+                hand_state = class_names[preds[0]]
+                print(f"hand_state: {hand_state}")
+
+                draw_process_status(draw_on_me, rgb_hand)
+                cv2.imshow(WINDOW_NAME, hand)
 #                if mask is not None:
 #                    cv2.imshow(WINDOW_NAME, mask)
 
@@ -363,11 +381,11 @@ def main():
     parser.add_argument("-m",
                         "--model",
                         type=argparse.FileType("r"),
-                        required=False)
+                        required=True)
 
     args = parser.parse_args()
 
-    start_capture(args.resolution)
+    start_capture(args.resolution, args.model.name)
 
 
 
