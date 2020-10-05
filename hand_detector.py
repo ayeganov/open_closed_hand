@@ -173,6 +173,8 @@ class SkinDetector:
         self._value_low = max(0.0, np.min((top_mean[2], bottom_mean[2])) - offset_low)
         self._value_high = np.max((top_mean[2], bottom_mean[2])) + offset_high
 
+        print(f"lh: {self._hue_low}, hh: {self._hue_high}, sl: {self._sat_low}, sh: {self._sat_high}, vl: {self._value_low}, vh: {self._value_high}")
+
     def calc_skin_mask(self, image):
         if self._hue_low is None:
             return np.zeros(image.shape, dtype=np.uint8)
@@ -244,6 +246,22 @@ def draw_process_status(image, mode):
                 cv2.LINE_AA)
 
 
+def draw_message(image, msg):
+    location = (300, 700)
+    font_scale = 1
+    color = (250, 0, 5)
+    thickness = 2
+
+    cv2.putText(image,
+                msg,
+                location,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                color,
+                thickness,
+                cv2.LINE_AA)
+
+
 def draw_hand_square(image):
     """
     Draw the hand square on the image
@@ -253,64 +271,102 @@ def draw_hand_square(image):
     @returns coordinate of the square for easy extraction
     """
     color_bgr = (100, 50, 255)
-    x, y = 20, 30
+    x, y = 200, 50
 
     return draw_rectangle(image, x, y, 260, 260, color_bgr)
 
 
+def mouse_callback(event, x, y, event_flag, skin_detector):
+    """
+    Handle the mouse callback
+    """
+    print(f"event: {event}, x: {x}, y: {y}, flag: {event_flag}, detector: {skin_detector}")
+
+
 def start_capture(resolution, model_path):
     cam = cv2.VideoCapture(0)
+
+    if not cam.isOpened():
+        print("Failed to open the camera, bailing...")
+        return
+
     cam.set(3, 1280)
     cam.set(4, 720)
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
-    network = get_model("cpu", model_path)
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(f"Using '{device}' for running the model")
+    network = get_model(device, model_path)
     detector = SkinDetector()
     bg_remover = BackgroundRemover()
 
     skin_status_location = (20, 20)
 
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(WINDOW_NAME, mouse_callback, param=detector)
+    cv2.createTrackbar("Vmin", WINDOW_NAME, 30, 255, lambda _: None)
+    cv2.createTrackbar("Vmax", WINDOW_NAME, 255, 255, lambda _: None)
+    cv2.createTrackbar("Smin", WINDOW_NAME, 30, 255, lambda _: None)
+
     mask = None
     mode = "setup"
     class_names = ["closed", "open"]
 
+    message = "Press 'c' for skin calibration, 'b' for background"
+
     while cam.isOpened():
         try:
-            k = cv2.waitKey(1) & 0xFF
+            k = cv2.waitKey(5) & 0xFF
             ret, frame = cam.read()
             frame = np.array(np.fliplr(frame))
-
-            if k == ord('o'):
-                # Open pressed
-                print("OPEN")
-            if k == ord('q'):
-                print("Exiting by user request...")
-                break
-            if k == ord('c'):
-                print("Performing calibration...")
-                detector.calibrate(frame)
-            if k == ord('m'):
-                print("Calculating the skin mask")
-                foreground = bg_remover.get_foreground(frame)
-                mask = detector.calc_skin_mask(foreground)
-            if k == ord('b'):
-                print("Capturing background")
-                bg_remover.calibrate(frame)
-            if k == ord('f'):
-                bg_remover.get_foreground(frame)
-            if k == ord('p'):
-                mode = "process" if mode == "setup" else "setup"
-            if k == 27:
-                # ESC pressed
-                print("Escape hit, closing...")
-                break
 
             if not ret:
                 print("failed to grab frame")
                 break
 
+            if k == ord('o'):
+                # Open pressed
+                print("OPEN")
+            elif k == ord('q'):
+                print("Exiting by user request...")
+                break
+            elif k == ord('c'):
+                print("Performing calibration...")
+                detector.calibrate(frame)
+            elif k == ord('m'):
+                print("Calculating the skin mask")
+                foreground = bg_remover.get_foreground(frame)
+                mask = detector.calc_skin_mask(foreground)
+            elif k == ord('b'):
+                print("Capturing background")
+                bg_remover.calibrate(frame)
+            elif k == ord('f'):
+                bg_remover.get_foreground(frame)
+            elif k == ord('p'):
+                if not (detector.calibrated and bg_remover.calibrated):
+                    message = "Calibrate skin detector and bg remover"
+                    continue
+                mode = "process"
+                message = "Move your hand into the highlighted square"
+            elif k == ord('s'):
+                mode = "setup"
+                message = "Press 's' for skin calibration, 'b' for background"
+            elif k == ord('d'):
+                if not (detector.calibrated and bg_remover.calibrated):
+                    message = "Calibrate skin detector and bg remover"
+                    continue
+                mode = "data"
+                message = "Move your hand into the highlighted square"
+            elif k == 27:
+                # ESC pressed
+                print("Escape hit, closing...")
+                break
+
+            draw_on_me = frame.copy()
+
+            draw_message(draw_on_me, message)
             if mode == "setup":
-                skin_samples, top, bottom = detector.draw_skin_samples(frame.copy())
+                skin_samples, top, bottom = detector.draw_skin_samples(draw_on_me)
                 draw_process_status(skin_samples, mode)
 
                 (x_left, y_left), (x_right, y_right) = top
@@ -323,6 +379,8 @@ def start_capture(resolution, model_path):
                 draw_bg_status(skin_samples, bg_remover)
 
                 cv2.imshow(WINDOW_NAME, skin_samples)
+
+
     #            cv2.imshow("top_sample", top_sample)
     #            cv2.imshow("bottom_sample", bottom_sample)
 
@@ -330,14 +388,19 @@ def start_capture(resolution, model_path):
                 foreground = bg_remover.get_foreground(frame)
                 mask = detector.calc_skin_mask(foreground)
 
-                draw_on_me = frame.copy()
                 (x_left, y_left), (x_right, y_right) = draw_hand_square(draw_on_me)
 
                 hand = mask[y_left:y_right, x_left:x_right]
                 hand = cv2.bitwise_not(hand)
-                rgb_hand = cv2.cvtColor(hand, cv2.COLOR_GRAY2RGB)
 
-                net_input = eval_transform(rgb_hand)
+#                kernel = np.ones((5,5),np.uint8)
+#                hand = cv2.morphologyEx(hand, cv2.MORPH_CLOSE, kernel)
+
+                rgb_hand = cv2.cvtColor(hand, cv2.COLOR_GRAY2RGB)
+                draw_on_me[y_left:y_right, x_left:x_right] = cv2.cvtColor(hand, cv2.COLOR_GRAY2RGB)
+
+                net_input = eval_transform(rgb_hand).to(device)
+
                 batch = net_input[None, ...]
 
                 outputs = network(batch)
@@ -346,15 +409,15 @@ def start_capture(resolution, model_path):
                 hand_state = class_names[preds[0]]
                 print(f"hand_state: {hand_state}")
 
-                draw_process_status(draw_on_me, rgb_hand)
-                cv2.imshow(WINDOW_NAME, hand)
+                draw_process_status(draw_on_me, mode)
+                cv2.imshow(WINDOW_NAME, draw_on_me)
 #                if mask is not None:
 #                    cv2.imshow(WINDOW_NAME, mask)
 
         except KeyboardInterrupt:
             # When everything done, release the capture
-            cam.release()
             cv2.destroyAllWindows()
+            cam.release()
             print("Exiting due to interrupt...")
 
 
@@ -386,7 +449,6 @@ def main():
     args = parser.parse_args()
 
     start_capture(args.resolution, args.model.name)
-
 
 
 if __name__ == "__main__":
