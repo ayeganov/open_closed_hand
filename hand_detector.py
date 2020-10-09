@@ -270,7 +270,7 @@ class SkinDetector:
                 return None, change_me, None
 
             pt1, pt2 = hand_box
-            hand = change_me[pt1[0]:pt2[0], pt1[1]:pt2[1]]
+            hand = change_me[pt1[1]:pt2[1], pt1[0]:pt2[0]]
 
             return hand, change_me, hand_box
 
